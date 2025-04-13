@@ -140,4 +140,3 @@ This project is open-source and released under the [MIT License](LICENSE).
 
 ---
 
-Feel free to modify any section to suit your project further. Let me know if you need any additional details or changes!
