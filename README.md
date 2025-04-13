@@ -1,6 +1,3 @@
-Sure! Here's a **README.md** template for your GitHub repository. You can customize it as needed for your project:
-
----
 
 NFC-Based Inventory Management System
 
