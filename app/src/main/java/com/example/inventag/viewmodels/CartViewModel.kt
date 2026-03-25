@@ -1,27 +1,25 @@
 package com.example.inventag.viewmodels
 
-import android.util.Log
-import com.example.inventag.data.repositories.InventoryRepository
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.inventag.data.repositories.CartRepository
+import com.example.inventag.usecases.TagProcessingResult
+import com.example.inventag.usecases.TagProcessorUseCase
 import com.example.inventag.data.repositories.ScannerRepository
 import com.example.inventag.models.CartItem
 import com.example.inventag.models.InventoryItem
-import com.example.inventag.screens.auth.LoginScreen
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.util.Date
 import javax.inject.Inject
 
 @HiltViewModel
 class CartViewModel @Inject constructor(
     private val cartRepository: CartRepository,
-    private val inventoryRepository: InventoryRepository,
-    private val scannerRepository: ScannerRepository
+    private val scannerRepository: ScannerRepository,
+    private val tagProcessorUseCase: TagProcessorUseCase
 ) : ViewModel() {
 
     private val _cartItems = MutableStateFlow<List<CartItem>>(emptyList())
@@ -36,21 +34,63 @@ class CartViewModel @Inject constructor(
     private val _totalAmount = MutableStateFlow(0.0)
     val totalAmount: StateFlow<Double> = _totalAmount.asStateFlow()
 
-    private val _errorMessage = MutableStateFlow<String?>(null)
-    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+    private val _alertMessage = MutableStateFlow<String?>(null)
+    val alertMessage: StateFlow<String?> = _alertMessage.asStateFlow()
 
     init {
         loadCartItems()
+        // ✅ NEW: Start listening for NFC scans as soon as the ViewModel is created.
+        observeNfcScansForCart()
+    }
 
-        // Observe NFC scans
+    // ✅ NEW: This function listens for tag detections from the shared ScannerRepository.
+    private fun observeNfcScansForCart() {
         viewModelScope.launch {
             scannerRepository.nfcScans.collect { tagId ->
+                // Process any tag that is detected, as long as scanning is active.
                 if (tagId != null && _isScanning.value) {
-                    addItemFromNfcTag(tagId)
-                    _isScanning.value = false
+                    handleScannedItem(tagId)
                 }
             }
         }
+    }
+
+    private fun handleScannedItem(tagId: String) {
+        viewModelScope.launch {
+            when (val result = tagProcessorUseCase.processTag(tagId)) {
+                is TagProcessingResult.Success -> {
+                    addItemToCart(result.item)
+                    // The hardware alerts are handled by the use case.
+                    // We just set a message for the UI.
+                    if (result.item.isExpired() || result.item.isLowStock()) {
+                        _alertMessage.value = result.statusMessage
+                    }
+                }
+                is TagProcessingResult.UnknownTag -> {
+                    _alertMessage.value = "This tag is not assigned to any item."
+                }
+                is TagProcessingResult.Error -> {
+                    _alertMessage.value = result.message
+                }
+                // ✅ FIXED: Added the required 'else' branch to make the 'when' exhaustive.
+                else -> {
+                    // This case should not happen with the current sealed class,
+                    // but it satisfies the compiler.
+                }
+            }
+        }
+    }
+
+    private fun addItemToCart(item: InventoryItem) {
+        viewModelScope.launch {
+            // Assuming a demo price since it's not in the InventoryItem model.
+            // You might want to add a price field to your InventoryItem model.
+            cartRepository.addItem(item.id, item.name, 19.99, 1)
+        }
+    }
+
+    fun onAlertMessageShown() {
+        _alertMessage.value = null
     }
 
     private fun loadCartItems() {
@@ -93,60 +133,29 @@ class CartViewModel @Inject constructor(
     }
 
     fun startNfcScan() {
+        if (_isScanning.value) return
         _isScanning.value = true
-        viewModelScope.launch {
-            scannerRepository.startNfcScan()
-        }
+        scannerRepository.startNfcScan()
     }
 
     fun stopNfcScan() {
         _isScanning.value = false
-        viewModelScope.launch {
-            scannerRepository.stopNfcScan()
-        }
-    }
-
-    private fun addItemFromNfcTag(tagId: String) {
-        viewModelScope.launch {
-            try {
-                val item = inventoryRepository.getItemByTagId(tagId)
-                if (item != null) {
-                    cartRepository.addItem(item.id, item.name, 19.99, 1) // Default price for demo
-                } else {
-                    Log.e("CartViewModel", "Item not found for NFC tag: $tagId")
-                    _errorMessage.value = "Item not found for NFC tag: $tagId"
-                }
-            } catch (e: Exception) {
-               Log.e("CartViewModel", "Error adding item from NFC tag", e)
-            }
-        }
+        scannerRepository.stopNfcScan()
     }
 
     fun checkout() {
         viewModelScope.launch {
-            _isLoading.value = true
-
-            // Update inventory quantities
-            for (cartItem in _cartItems.value) {
-                val inventoryItem =  inventoryRepository.getItemByItemId(cartItem.inventoryItemId)
-                if (inventoryItem != null) {
-                    val isExpired = inventoryItem.expiryDate?.toDate()?.before(Date()) == true
-                    val isLowStock = inventoryItem.quantity < 5
-                    if (isExpired) {
-                        scannerRepository.triggerBuzzer()
-                    } else if (isLowStock) {
-                        scannerRepository.triggerLowStockIndicator()
-                    }
+            try {
+                _isLoading.value = true
+                val checkoutSuccess = cartRepository.checkout()
+                if (!checkoutSuccess) {
+                    _alertMessage.value = "Checkout failed. Some items may be out of stock."
                 }
-                inventoryRepository.decreaseItemQuantity(cartItem.inventoryItemId, cartItem.quantity)
+            } catch (e: Exception) {
+                _alertMessage.value = "An error occurred during checkout."
+            } finally {
+                _isLoading.value = false
             }
-
-            // Clear the cart
-            cartRepository.clearCart()
-
-            _isLoading.value = false
         }
     }
-
-
 }

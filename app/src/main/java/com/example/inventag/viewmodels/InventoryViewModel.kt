@@ -6,26 +6,39 @@ import com.example.inventag.data.repositories.InventoryRepository
 import com.example.inventag.data.repositories.ScannerRepository
 import com.example.inventag.models.InventoryItem
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.Date
 import javax.inject.Inject
 
+// Sealed class for better state management of scan results
+sealed class ScanResult {
+    object Idle : ScanResult()
+    object Loading : ScanResult()
+    data class ExistingItem(val item: InventoryItem) : ScanResult()
+    data class NewTag(val tagId: String, val unassignedItems: List<InventoryItem>) : ScanResult()
+    data class Error(val message: String) : ScanResult()
+}
+
+// Data classes remain the same
 data class InventoryFilter(
     val category: String? = null,
     val showExpired: Boolean = true,
     val showLowStock: Boolean = true
 )
 
-// New data class to replace Triple
 data class InventoryItemData(
     val name: String,
     val quantity: Int,
     val expiryDate: Date?,
     val category: String?
 )
+
+// ## A new sealed class for one-time events from the ViewModel to the UI
+sealed class AddItemEvent {
+    data class Success(val itemId: String, val itemName: String) : AddItemEvent()
+}
+
 
 @HiltViewModel
 class InventoryViewModel @Inject constructor(
@@ -48,52 +61,56 @@ class InventoryViewModel @Inject constructor(
     private val _currentFilter = MutableStateFlow(InventoryFilter())
     val currentFilter: StateFlow<InventoryFilter> = _currentFilter.asStateFlow()
 
-    // NFC tag scanning properties
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
-    private val _detectedTagId = MutableStateFlow<String?>(null)
-    val detectedTagId: StateFlow<String?> = _detectedTagId.asStateFlow()
+    private val _scanResult = MutableStateFlow<ScanResult>(ScanResult.Idle)
+    val scanResult: StateFlow<ScanResult> = _scanResult.asStateFlow()
 
-    private val _pendingItemId = MutableStateFlow<String?>(null)
-    val pendingItemId: StateFlow<String?> = _pendingItemId.asStateFlow()
+    // ## A new SharedFlow to emit one-time events for the "Add Item" success dialog
+    private val _addItemEvent = MutableSharedFlow<AddItemEvent>()
+    val addItemEvent: SharedFlow<AddItemEvent> = _addItemEvent.asSharedFlow()
 
-    private val _pendingItemData = MutableStateFlow<InventoryItemData?>(null)
-    val pendingItemData: StateFlow<InventoryItemData?> = _pendingItemData.asStateFlow()
 
     init {
         loadInventoryItems()
         loadCategories()
 
-        // Observe NFC scans
         viewModelScope.launch {
             scannerRepository.nfcScans.collect { tagId ->
                 if (tagId != null && _isScanning.value) {
-                    _detectedTagId.value = tagId
                     _isScanning.value = false
+                    processScannedTag(tagId)
                 }
             }
         }
     }
 
-    // Method to start NFC scanning for a new item
-    fun startNfcScanForNewItem() {
+    private fun processScannedTag(tagId: String) {
+        viewModelScope.launch {
+            _scanResult.value = ScanResult.Loading
+            try {
+                val existingItem = inventoryRepository.getItemByTagId(tagId)
+                if (existingItem != null) {
+                    _scanResult.value = ScanResult.ExistingItem(existingItem)
+                } else {
+                    val unassignedItems = inventoryRepository.getUnassignedItems()
+                    _scanResult.value = ScanResult.NewTag(tagId, unassignedItems)
+                }
+            } catch (e: Exception) {
+                _scanResult.value = ScanResult.Error(e.message ?: "An unknown error occurred")
+            }
+        }
+    }
+
+    fun startNfcScan() {
+        _scanResult.value = ScanResult.Idle
         _isScanning.value = true
         viewModelScope.launch {
             scannerRepository.startNfcScan()
         }
     }
 
-    // Method to start NFC scanning for an existing item
-    fun startNfcScanForExistingItem(itemId: String) {
-        _pendingItemId.value = itemId
-        _isScanning.value = true
-        viewModelScope.launch {
-            scannerRepository.startNfcScan()
-        }
-    }
-
-    // Method to stop NFC scanning
     fun stopNfcScan() {
         _isScanning.value = false
         viewModelScope.launch {
@@ -101,45 +118,17 @@ class InventoryViewModel @Inject constructor(
         }
     }
 
-    // Method to handle detected NFC tag
-    fun onNfcTagDetected(tagId: String) {
-        _detectedTagId.value = tagId
-        _isScanning.value = false
+    fun clearScanResult() {
+        _scanResult.value = ScanResult.Idle
     }
 
-    // Method to clear detected tag
-    fun clearDetectedTag() {
-        _detectedTagId.value = null
-        _pendingItemId.value = null
-    }
-
-    // Method to associate tag with pending item
-    fun associateTagWithPendingItem() {
+    fun associateTagWithItem(itemId: String, tagId: String) {
         viewModelScope.launch {
             try {
-                val tagId = _detectedTagId.value ?: return@launch
-
-                // If we have a pending item ID, associate the tag with it
-                _pendingItemId.value?.let { itemId ->
-                    inventoryRepository.associateTagWithItem(itemId, tagId)
-                    _pendingItemId.value = null
-                }
-
-                // If we have pending item data, create a new item and associate the tag
-                _pendingItemData.value?.let { itemData ->
-                    val itemId = inventoryRepository.addInventoryItemAndGetId(
-                        itemData.name,
-                        itemData.quantity,
-                        itemData.expiryDate, // This can be null now
-                        itemData.category ?: "Uncategorized"
-                    )
-                    inventoryRepository.associateTagWithItem(itemId, tagId)
-                    _pendingItemData.value = null
-                }
-
-                _detectedTagId.value = null
+                inventoryRepository.associateTagWithItem(itemId, tagId)
+                clearScanResult()
             } catch (e: Exception) {
-                // Handle error
+                _scanResult.value = ScanResult.Error("Failed to associate tag: ${e.message}")
             }
         }
     }
@@ -162,15 +151,17 @@ class InventoryViewModel @Inject constructor(
         }
     }
 
-    fun addItem(name: String, quantity: Int, expiryDate: Date?, category: String) {
+    // ## This function now gets the new ID and emits a success event
+    fun addItem(name: String, quantity: Int, expiryDate: Date?, category: String, price: Double?) {
         viewModelScope.launch {
-            inventoryRepository.addInventoryItem(name, quantity, expiryDate, category)
+            val newId = inventoryRepository.addInventoryItem(name, quantity, expiryDate, category, price)
+            _addItemEvent.emit(AddItemEvent.Success(itemId = newId, itemName = name))
         }
     }
 
-    fun updateItem(id: String, name: String, quantity: Int, expiryDate: Date?, category: String) {
+    fun updateItem(id: String, name: String, quantity: Int, expiryDate: Date?, category: String, price: Double?) {
         viewModelScope.launch {
-            inventoryRepository.updateInventoryItem(id, name, quantity, expiryDate, category)
+            inventoryRepository.updateInventoryItem(id, name, quantity, expiryDate, category, price)
         }
     }
 

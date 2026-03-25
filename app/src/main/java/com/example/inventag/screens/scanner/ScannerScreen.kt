@@ -21,6 +21,7 @@ import com.example.inventag.ui.components.BottomNavBar
 import com.example.inventag.ui.theme.ExpiredRed
 import com.example.inventag.ui.theme.LowStockOrange
 import com.example.inventag.ui.theme.ValidGreen
+import com.example.inventag.viewmodels.ScannerUiState
 import com.example.inventag.viewmodels.ScannerViewModel
 import java.text.SimpleDateFormat
 import java.util.*
@@ -31,11 +32,8 @@ fun ScannerScreen(
     navController: NavController,
     viewModel: ScannerViewModel = hiltViewModel()
 ) {
-    val isScanning by viewModel.isScanning.collectAsState()
-    val scannedItem by viewModel.scannedItem.collectAsState()
-    val isLoading by viewModel.isLoading.collectAsState()
-    val errorMessage by viewModel.errorMessage.collectAsState()
-    val tagId by viewModel.tagId.collectAsState()
+    // **FIXED**: Collect the single UI state object
+    val uiState by viewModel.uiState.collectAsState()
 
     Scaffold(
         topBar = {
@@ -47,33 +45,32 @@ fun ScannerScreen(
             BottomNavBar(navController = navController)
         }
     ) { paddingValues ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            contentAlignment = Alignment.Center
         ) {
-            if (isLoading) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
+            // **FIXED**: Use a 'when' expression to handle the different UI states
+            when (val state = uiState) {
+                is ScannerUiState.Loading -> {
                     CircularProgressIndicator()
                 }
-            } else {
-                if (scannedItem != null) {
+                is ScannerUiState.Success -> {
                     ScannedItemDetails(
-                        item = scannedItem!!,
-                        onDismiss = { viewModel.clearScannedItem() }
+                        item = state.item,
+                        statusMessage = state.statusMessage,
+                        onDismiss = { viewModel.clearUiState() }
                     )
-                } else {
-                    ScannerView(
-                        isScanning = isScanning,
+                }
+                // All other states (Idle, Scanning, AssignTag, Error) are handled by the main content view
+                else -> {
+                    ScannerContent(
+                        state = state,
                         onStartScan = { viewModel.startScanning() },
                         onStopScan = { viewModel.stopScanning() },
-                        errorMessage = errorMessage,
-                        tagId = tagId
+                        onAssignTag = { itemId, tagId -> viewModel.assignTagToItem(itemId, tagId) }
                     )
                 }
             }
@@ -82,26 +79,14 @@ fun ScannerScreen(
 }
 
 @Composable
-fun ScannerView(
-    isScanning: Boolean,
+fun ScannerContent(
+    state: ScannerUiState,
     onStartScan: () -> Unit,
     onStopScan: () -> Unit,
-    errorMessage: String?,
-    tagId: String?
+    onAssignTag: (String, String) -> Unit
 ) {
-    val viewModel: ScannerViewModel = hiltViewModel()
-    val allItems by viewModel.allInventoryItems.collectAsState()
-    val isTagAlreadyAssigned by viewModel.isTagAlreadyAssigned.collectAsState()
     var selectedItemId by remember { mutableStateOf<String?>(null) }
-    var showAttachButton by remember { mutableStateOf(false) }
-
-    LaunchedEffect(tagId) {
-        if (!tagId.isNullOrEmpty()) {
-            viewModel.stopScanning()
-            viewModel.checkIfTagExists(tagId)
-            viewModel.loadAllInventoryItems()
-        }
-    }
+    val isScanning = state is ScannerUiState.Scanning
 
     Column(
         modifier = Modifier
@@ -110,6 +95,7 @@ fun ScannerView(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+        // --- Top section: Icon and Status Text ---
         Box(
             modifier = Modifier
                 .size(200.dp)
@@ -118,138 +104,89 @@ fun ScannerView(
             contentAlignment = Alignment.Center
         ) {
             if (isScanning) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(80.dp),
-                    color = MaterialTheme.colorScheme.primary
-                )
+                CircularProgressIndicator(modifier = Modifier.size(80.dp), color = MaterialTheme.colorScheme.primary)
             } else {
-                Icon(
-                    imageVector = Icons.Default.Nfc,
-                    contentDescription = null,
-                    modifier = Modifier.size(80.dp),
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer
-                )
+                Icon(Icons.Default.Nfc, contentDescription = null, modifier = Modifier.size(80.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
             }
         }
-
         Spacer(modifier = Modifier.height(32.dp))
 
-        Text(
-            text = if (isScanning) "Scanning... Place NFC tag near device" else "Ready to Scan",
-            style = MaterialTheme.typography.titleLarge,
-            textAlign = TextAlign.Center
-        )
+        // **FIXED**: Display message based on the current state
+        val messageToDisplay = when (state) {
+            is ScannerUiState.Idle -> "Ready to Scan"
+            is ScannerUiState.Scanning -> "Scanning... Place tag near device"
+            is ScannerUiState.AssignTag -> "New tag detected. Please assign it to an item."
+            is ScannerUiState.Error -> state.message
+            else -> "" // Other states handled elsewhere
+        }
+        Text(text = messageToDisplay, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        Text(
-            text = if (isScanning)
-                "Hold your device near the NFC tag to scan"
-            else
-                "Tap the button below to start scanning for NFC tags",
-            style = MaterialTheme.typography.bodyLarge,
-            textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Button(
-            onClick = if (isScanning) onStopScan else onStartScan,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-            )
-        ) {
-            Icon(
-                imageVector = if (isScanning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                contentDescription = null,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(if (isScanning) "Stop Scanning" else "Start Scanning")
+        // --- Middle section: Scan Button ---
+        // Show the button only if we are not in the 'AssignTag' state
+        if (state !is ScannerUiState.AssignTag) {
+            Button(
+                onClick = if (isScanning) onStopScan else onStartScan,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = if (isScanning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+            ) {
+                Icon(if (isScanning) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(if (isScanning) "Stop Scanning" else "Start Scanning")
+            }
         }
 
-        errorMessage?.let {
+        // --- Bottom section: Item Assignment List ---
+        // Only shows when the state is 'AssignTag'
+        if (state is ScannerUiState.AssignTag) {
+            val availableItems = state.availableItems
+            val tagId = state.tagId
+
             Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = it,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center
-            )
-        }
 
-        tagId?.let {
-            Spacer(modifier = Modifier.height(32.dp))
-
-            if (isTagAlreadyAssigned) {
-                Text(
-                    text = "This Tag is already linked to an item.",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center
-                )
+            if (availableItems.isEmpty()) {
+                Text("No unassigned items available.")
             } else {
-                Text(
-                    text = "Choose an item to attach Tag ID",
-                    style = MaterialTheme.typography.titleLarge,
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                if (allItems.isEmpty()) {
-                    Text("No items available.")
-                } else {
-                    Column {
-                        allItems.forEach { item ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                            ) {
-                                RadioButton(
-                                    selected = selectedItemId == item.id,
-                                    onClick = {
-                                        selectedItemId = item.id
-                                        showAttachButton = true
-                                    }
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text(text = item.name, style = MaterialTheme.typography.titleMedium)
-                                    Text(
-                                        text = "Qty: ${item.quantity}, Category: ${item.category}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                Column {
+                    // **FIXED**: Use a standard 'for' loop for Composable
+                    for (item in availableItems) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            RadioButton(
+                                selected = selectedItemId == item.id,
+                                onClick = { selectedItemId = item.id }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = item.name, style = MaterialTheme.typography.titleMedium)
+                                Text(text = "Qty: ${item.quantity}, Category: ${item.category}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
+                    }
 
-                        if (showAttachButton && selectedItemId != null) {
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            Button(
-                                onClick = {
-                                    viewModel.attachTagToItem(tagId, selectedItemId!!)
-                                    showAttachButton = false
-                                    selectedItemId = null
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(48.dp)
-                            ) {
-                                Text("Attach Tag to Item")
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = {
+                            selectedItemId?.let {
+                                onAssignTag(it, tagId)
                             }
-                        }
+                        },
+                        enabled = selectedItemId != null, // Button is disabled until an item is selected
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        Text("Attach Tag to Item")
                     }
                 }
             }
@@ -260,10 +197,10 @@ fun ScannerView(
 @Composable
 fun ScannedItemDetails(
     item: InventoryItem,
+    statusMessage: String, // Receive the specific status message
     onDismiss: () -> Unit
 ) {
     val dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
-
     val isExpired = item.isExpired()
     val isLowStock = item.isLowStock()
 
@@ -272,7 +209,6 @@ fun ScannedItemDetails(
         isLowStock -> LowStockOrange
         else -> ValidGreen
     }
-
     val statusText = when {
         isExpired -> "Expired"
         isLowStock -> "Low Stock"
@@ -291,20 +227,15 @@ fun ScannedItemDetails(
             modifier = Modifier.size(80.dp),
             tint = MaterialTheme.colorScheme.primary
         )
-
         Spacer(modifier = Modifier.height(16.dp))
-
         Text(
-            text = "Item Scanned Successfully",
+            // **FIXED**: Use the dynamic status message from the state
+            text = statusMessage,
             style = MaterialTheme.typography.headlineSmall,
             textAlign = TextAlign.Center
         )
-
         Spacer(modifier = Modifier.height(32.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -316,68 +247,33 @@ fun ScannedItemDetails(
                     style = MaterialTheme.typography.headlineMedium,
                     textAlign = TextAlign.Center
                 )
-
                 Spacer(modifier = Modifier.height(8.dp))
-
                 Text(
                     text = "Category: ${item.category}",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
                 Spacer(modifier = Modifier.height(16.dp))
-
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "Quantity",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = item.quantity.toString(),
-                            style = MaterialTheme.typography.titleLarge
-                        )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(text = "Quantity", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(text = item.quantity.toString(), style = MaterialTheme.typography.titleLarge)
                     }
-
-                    // Only show expiry date if it exists
                     item.expiryDate?.let { expiry ->
                         val expiryDate = dateFormat.format(expiry.toDate())
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "Expires On",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = expiryDate,
-                                style = MaterialTheme.typography.titleLarge
-                            )
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(text = "Expires On", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(text = expiryDate, style = MaterialTheme.typography.titleLarge)
                         }
-                    } ?: Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "Expiry",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "N/A",
-                            style = MaterialTheme.typography.titleLarge
-                        )
+                    } ?: Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(text = "Expiry", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(text = "N/A", style = MaterialTheme.typography.titleLarge)
                     }
                 }
-
                 Spacer(modifier = Modifier.height(16.dp))
-
                 Surface(
                     color = statusColor.copy(alpha = 0.1f),
                     shape = MaterialTheme.shapes.medium,
@@ -392,9 +288,7 @@ fun ScannedItemDetails(
                 }
             }
         }
-
         Spacer(modifier = Modifier.height(32.dp))
-
         Button(
             onClick = onDismiss,
             modifier = Modifier
@@ -405,5 +299,3 @@ fun ScannedItemDetails(
         }
     }
 }
-
-

@@ -15,14 +15,15 @@ import java.util.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Nfc
 
-// Update the dialog to include NFC tag association
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddEditInventoryItemDialog(
     item: InventoryItem? = null,
     onDismiss: () -> Unit,
-    onSave: (name: String, quantity: Int, expiryDate: Date?, category: String) -> Unit,
-    onScanNfcTag: () -> Unit
+    // ✅ MODIFIED: The onSave lambda now includes the 'price' parameter.
+    onSave: (name: String, quantity: Int, expiryDate: Date?, category: String, price: Double?) -> Unit,
+    // ✅ MODIFIED: The onScanNfcTag parameter is now optional.
+    onScanNfcTag: (() -> Unit)? = null
 ) {
     val isEditing = item != null
     val title = if (isEditing) "Edit Item" else "Add New Item"
@@ -30,6 +31,8 @@ fun AddEditInventoryItemDialog(
     var name by remember { mutableStateOf(item?.name ?: "") }
     var quantityText by remember { mutableStateOf(item?.quantity?.toString() ?: "") }
     var category by remember { mutableStateOf(item?.category ?: "") }
+    // ✅ NEW: State for the price text field.
+    var priceText by remember { mutableStateOf(item?.price?.toString() ?: "") }
     var hasExpiryDate by remember { mutableStateOf(item?.expiryDate != null) }
 
     val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
@@ -70,7 +73,7 @@ fun AddEditInventoryItemDialog(
                 OutlinedTextField(
                     value = quantityText,
                     onValueChange = {
-                        if (it.isEmpty() || it.toIntOrNull() != null) {
+                        if (it.isEmpty() || it.all { char -> char.isDigit() }) {
                             quantityText = it
                         }
                     },
@@ -78,6 +81,17 @@ fun AddEditInventoryItemDialog(
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true
+                )
+
+                // ✅ NEW: Text field for price.
+                OutlinedTextField(
+                    value = priceText,
+                    onValueChange = { priceText = it },
+                    label = { Text("Price (Optional)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    prefix = { Text("₹") }
                 )
 
                 OutlinedTextField(
@@ -88,7 +102,6 @@ fun AddEditInventoryItemDialog(
                     singleLine = true
                 )
 
-                // Add checkbox for expiry date
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
@@ -100,7 +113,6 @@ fun AddEditInventoryItemDialog(
                     Text("Has Expiry Date")
                 }
 
-                // Only show expiry date field if hasExpiryDate is true
                 if (hasExpiryDate) {
                     OutlinedTextField(
                         value = expiryDateText,
@@ -116,22 +128,24 @@ fun AddEditInventoryItemDialog(
                     )
                 }
 
-                // Add NFC tag association button
-//                Button(
-//                    onClick = onScanNfcTag,
-//                    modifier = Modifier.fillMaxWidth(),
-//                    colors = ButtonDefaults.buttonColors(
-//                        containerColor = MaterialTheme.colorScheme.secondary
-//                    )
-//                ) {
-//                    Icon(
-//                        imageVector = Icons.Default.Nfc,
-//                        contentDescription = null,
-//                        modifier = Modifier.size(24.dp)
-//                    )
-//                    Spacer(modifier = Modifier.width(8.dp))
-//                    Text("Scan NFC Tag to Associate")
-//                }
+                // ✅ MODIFIED: The "Scan NFC Tag" button now only shows if you are editing an item.
+                if (isEditing && onScanNfcTag != null) {
+                    Button(
+                        onClick = onScanNfcTag,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Nfc,
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Scan NFC Tag to Associate")
+                    }
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -146,6 +160,7 @@ fun AddEditInventoryItemDialog(
                     Button(
                         onClick = {
                             val quantity = quantityText.toIntOrNull() ?: 0
+                            val price = priceText.toDoubleOrNull()
                             val expiryDate = if (hasExpiryDate) {
                                 try {
                                     dateFormat.parse(expiryDateText)
@@ -154,7 +169,8 @@ fun AddEditInventoryItemDialog(
                                 }
                             } else null
 
-                            onSave(name, quantity, expiryDate, category)
+                            // ✅ MODIFIED: Pass the price to the onSave function.
+                            onSave(name, quantity, expiryDate, category, price)
                         },
                         enabled = name.isNotBlank() && quantityText.isNotBlank() && category.isNotBlank()
                     ) {
@@ -167,6 +183,7 @@ fun AddEditInventoryItemDialog(
 
     if (showDatePicker && hasExpiryDate) {
         val datePickerState = rememberDatePickerState()
+        val coroutineScope = rememberCoroutineScope()
 
         DatePickerDialog(
             onDismissRequest = { showDatePicker = false },
@@ -174,7 +191,10 @@ fun AddEditInventoryItemDialog(
                 TextButton(
                     onClick = {
                         datePickerState.selectedDateMillis?.let { millis ->
-                            expiryDateText = dateFormat.format(Date(millis))
+                            // Correctly handle timezone offset
+                            val calendar = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
+                            calendar.timeInMillis = millis
+                            expiryDateText = dateFormat.format(calendar.time)
                         }
                         showDatePicker = false
                     }

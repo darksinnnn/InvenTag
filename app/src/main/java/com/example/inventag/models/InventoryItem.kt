@@ -7,7 +7,7 @@ data class InventoryItem(
     val id: String = "",
     val name: String = "",
     val quantity: Int = 0,
-    val price: Double = 0.0,
+    val price: Double? = null,
     val expiryDate: Timestamp? = null,
     val category: String = "",
     val nfcTagId: String? = null,

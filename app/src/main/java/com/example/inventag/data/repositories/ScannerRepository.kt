@@ -33,49 +33,40 @@ class ScannerRepository @Inject constructor(
     private val _nfcScans = MutableStateFlow<String?>(null)
     val nfcScans: StateFlow<String?> = _nfcScans
 
-    private var isScanning = false
-    private val scanJob = Job()
-    private val scanScope = CoroutineScope(Dispatchers.IO + scanJob)
+    private var scanJob: Job? = null
 
-    // Function to get ESP32 IP Address properly
     private suspend fun getEsp32IpAddress(): String {
         return settingsRepository.getEsp32IpAddress().firstOrNull() ?: "192.168.1.100" // Default fallback
     }
 
     fun startNfcScan() {
-        if (isScanning) return
-        isScanning = true
+        if (scanJob?.isActive == true) return
+        scanJob = CoroutineScope(Dispatchers.IO).launch {
+            while (isActive) {
+                try {
+                    Log.d("ScannerRepository", "Polling for NFC tag...")
+                    val tagId = pollForNfcTag()
 
-        scanScope.launch {
-            try {
-                var retry_count=10;
-                while (retry_count>0) {
-                    try {
-                        Log.d("ScannerRepository", "Polling for NFC tag")
-                        val tagId = pollForNfcTag()
-
-                        if (tagId != null) {
-                            _nfcScans.value = tagId
-                            delay(500)
-                            break
-                        }
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        Log.e("ScannerRepository", "Error polling for NFC tag", e)
+                    if (tagId != null) {
+                        _nfcScans.value = tagId
+                        delay(1500)
+                        _nfcScans.value = null
                     }
-                    retry_count--
-                    delay(500)
+                } catch (e: Exception) {
+                    if (e is CancellationException) {
+                        Log.d("ScannerRepository", "NFC polling was cancelled.")
+                        throw e
+                    }
+                    Log.e("ScannerRepository", "Error while polling for NFC tag", e)
                 }
-            } catch (e: Exception) {
-                Log.d("ScannerRepository", "NFC scanning coroutine ended")
+                delay(500)
             }
         }
-//        isScanning = false
     }
 
     fun stopNfcScan() {
-        isScanning = false
-        scanJob.cancel()
+        scanJob?.cancel()
+        scanJob = null
     }
 
     private suspend fun pollForNfcTag(): String? = withContext(Dispatchers.IO) {
@@ -84,8 +75,8 @@ class ScannerRepository @Inject constructor(
             val url = URL("http://$ipAddress/nfc/read")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 15000
-            connection.readTimeout = 15000
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
             Log.d("ScannerRepository", "Polling from IP: $ipAddress")
 
             if (connection.responseCode == HttpURLConnection.HTTP_OK) {
@@ -98,7 +89,7 @@ class ScannerRepository @Inject constructor(
                 reader.close()
 
                 val jsonObject = JSONObject(response.toString())
-                val tagId = jsonObject.optString("tagId", null)
+                val tagId = jsonObject.optString("tagId")
 
                 if (!tagId.isNullOrEmpty() && tagId != "null") {
                     return@withContext tagId
@@ -113,20 +104,27 @@ class ScannerRepository @Inject constructor(
         }
     }
 
-    suspend fun getItemByTagId(tagId: String): InventoryItem {
-        return firestore.collection("nfc_tags")
+    // ✅ THIS IS THE CORRECTED FUNCTION
+    suspend fun getItemByTagId(tagId: String): InventoryItem? { // <-- Return nullable InventoryItem?
+        val tagDocument = firestore.collection("nfc_tags")
             .whereEqualTo("tagId", tagId)
             .limit(1)
             .get()
             .await()
             .documents
             .firstOrNull()
-            ?.let { tagDoc ->
-                val itemId = tagDoc.getString("itemId") ?: throw IllegalStateException("No associated item")
-                firestore.collection("inventory").document(itemId).get().await().toObject(InventoryItem::class.java)
-                    ?.copy(id = itemId) ?: throw IllegalStateException("Failed to retrieve inventory item")
+
+        return if (tagDocument != null) {
+            val itemId = tagDocument.getString("itemId")
+            if (itemId != null) {
+                firestore.collection("inventory").document(itemId).get().await()
+                    .toObject(InventoryItem::class.java)?.copy(id = itemId)
+            } else {
+                null
             }
-            ?: throw IllegalStateException("Tag not found")
+        } else {
+            null // <-- Return null if the tag is not found
+        }
     }
 
     suspend fun recordScan(itemId: String, itemName: String, quantity: Int) {
@@ -149,23 +147,19 @@ class ScannerRepository @Inject constructor(
     suspend fun triggerBuzzer() = withContext(Dispatchers.IO) {
         try {
             val ipAddress = getEsp32IpAddress()
-            val url = URL("http://$ipAddress/buzzer?duration=3000")
+            val url = URL("http://$ipAddress/buzzer?duration=800")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.connectTimeout = 5000
             connection.connect()
-
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                Log.e("ScannerRepository", "Failed to trigger buzzer: HTTP ${connection.responseCode}")
-            }
-
+            connection.responseCode
             connection.disconnect()
         } catch (e: Exception) {
             Log.e("ScannerRepository", "Error triggering buzzer", e)
         }
     }
 
-    suspend fun triggerLowStockIndicator() {
+    suspend fun triggerLowStockIndicator() = withContext(Dispatchers.IO) {
         try {
             val ipAddress = getEsp32IpAddress()
             val url = URL("http://$ipAddress/led?color=red&state=on")
@@ -173,11 +167,7 @@ class ScannerRepository @Inject constructor(
             connection.requestMethod = "GET"
             connection.connectTimeout = 5000
             connection.connect()
-
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                Log.e("ScannerRepository", "Failed to trigger LED: HTTP ${connection.responseCode}")
-            }
-
+            connection.responseCode
             connection.disconnect()
         } catch (e: Exception) {
             Log.e("ScannerRepository", "Error triggering LED", e)
@@ -195,11 +185,7 @@ class ScannerRepository @Inject constructor(
             connection.requestMethod = "GET"
             connection.connectTimeout = 5000
             connection.connect()
-
-            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                Log.e("ScannerRepository", "Failed to send alert to LCD: HTTP ${connection.responseCode}")
-            }
-
+            connection.responseCode
             connection.disconnect()
         } catch (e: Exception) {
             Log.e("ScannerRepository", "Error sending alert to LCD", e)

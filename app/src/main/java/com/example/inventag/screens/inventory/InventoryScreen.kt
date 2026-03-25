@@ -1,6 +1,5 @@
 package com.example.inventag.screens.inventory
 
-//import com.example.inventag.screens.inventory.InventoryItemCard
 import androidx.compose.foundation.background
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.collectAsState
@@ -13,18 +12,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-//import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
-//import com.example.inventag.models.InventoryItem
 import com.example.inventag.ui.components.BottomNavBar
-//import com.example.inventag.ui.theme.ExpiredRed
-//import com.example.inventag.ui.theme.LowStockOrange
-//import com.example.inventag.ui.theme.ValidGreen
+import com.example.inventag.viewmodels.AddItemEvent
 import com.example.inventag.viewmodels.InventoryViewModel
-//import java.text.SimpleDateFormat
-//import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -34,22 +27,24 @@ fun InventoryScreen(
 ) {
     val inventoryItems by viewModel.inventoryItems.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
-    val isScanning by viewModel.isScanning.collectAsState()
-    var showAddDialog by remember { mutableStateOf(false) }
-    var showFilterDialog by remember { mutableStateOf(false) }
-
-    // Handle NFC scanning for item association
-    LaunchedEffect(isScanning) {
-        if (!isScanning) {
-            viewModel.stopNfcScan()
-        }
-    }
-
-    // Collect other state flows
-//    val detectedTagId by viewModel.detectedTagId.collectAsState()
     val selectedItem by viewModel.selectedItem.collectAsState()
     val categories by viewModel.categories.collectAsState()
     val currentFilter by viewModel.currentFilter.collectAsState()
+
+    var showAddDialog by remember { mutableStateOf(false) }
+    var showFilterDialog by remember { mutableStateOf(false) }
+
+    var assignTagDialogState by remember { mutableStateOf<Pair<String, String>?>(null) }
+
+    LaunchedEffect(Unit) {
+        viewModel.addItemEvent.collect { event ->
+            when (event) {
+                is AddItemEvent.Success -> {
+                    assignTagDialogState = Pair(event.itemId, event.itemName)
+                }
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -78,18 +73,14 @@ fun InventoryScreen(
     ) { paddingValues ->
         if (isLoading) {
             Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
+                modifier = Modifier.fillMaxSize().padding(paddingValues),
                 contentAlignment = Alignment.Center
             ) {
                 CircularProgressIndicator()
             }
         } else if (inventoryItems.isEmpty()) {
             Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
+                modifier = Modifier.fillMaxSize().padding(paddingValues),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
@@ -103,10 +94,7 @@ fun InventoryScreen(
                         tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
                     )
                     Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "No inventory items yet",
-                        style = MaterialTheme.typography.titleLarge
-                    )
+                    Text(text = "No inventory items yet", style = MaterialTheme.typography.titleLarge)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Tap the + button to add your first item",
@@ -117,11 +105,8 @@ fun InventoryScreen(
             }
         } else {
             LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize().padding(paddingValues).padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(vertical = 16.dp)
             ) {
                 items(inventoryItems) { item ->
@@ -133,72 +118,13 @@ fun InventoryScreen(
                 }
             }
         }
-
-        // Show NFC scanning overlay if scanning
-        if (isScanning) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.7f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth(0.8f)
-                        .padding(16.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(64.dp),
-                            color = MaterialTheme.colorScheme.primary
-                        )
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                        Text(
-                            text = "Scanning for NFC Tag",
-                            style = MaterialTheme.typography.titleLarge
-                        )
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = "Hold an NFC tag near your device to associate it with this item",
-                            style = MaterialTheme.typography.bodyMedium,
-                            textAlign = TextAlign.Center
-                        )
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                        Button(
-                            onClick = { viewModel.stopNfcScan() },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error
-                            )
-                        ) {
-                            Text("Cancel")
-                        }
-                    }
-                }
-            }
-        }
     }
 
     if (showAddDialog) {
         AddEditInventoryItemDialog(
             onDismiss = { showAddDialog = false },
-            onSave = { name, quantity, expiryDate, category ->
-                viewModel.addItem(name, quantity, expiryDate, category)
-                showAddDialog = false
-            },
-            onScanNfcTag = {
-                viewModel.startNfcScanForNewItem()
+            onSave = { name, quantity, expiryDate, category, price ->
+                viewModel.addItem(name, quantity, expiryDate, category, price)
                 showAddDialog = false
             }
         )
@@ -208,12 +134,12 @@ fun InventoryScreen(
         AddEditInventoryItemDialog(
             item = item,
             onDismiss = { viewModel.clearSelectedItem() },
-            onSave = { name, quantity, expiryDate, category ->
-                viewModel.updateItem(item.id, name, quantity, expiryDate, category)
+            onSave = { name, quantity, expiryDate, category, price ->
+                viewModel.updateItem(item.id, name, quantity, expiryDate, category, price)
                 viewModel.clearSelectedItem()
             },
             onScanNfcTag = {
-                viewModel.startNfcScanForExistingItem(item.id)
+                navController.navigate("scanner/${item.id}")
                 viewModel.clearSelectedItem()
             }
         )
@@ -233,29 +159,28 @@ fun InventoryScreen(
         )
     }
 
-    // Show dialog for new NFC tag detection
-//    detectedTagId?.let { tagId ->
-//        AlertDialog(
-//            onDismissRequest = { viewModel.clearDetectedTag() },
-//            title = { Text("New NFC Tag Detected") },
-//            text = { Text("Would you like to associate this NFC tag (ID: $tagId) with a product?") },
-//            confirmButton = {
-//                Button(
-//                    onClick = {
-//                        viewModel.associateTagWithPendingItem()
-//                        viewModel.clearDetectedTag()
-//                    }
-//                ) {
-//                    Text("Associate")
-//                }
-//            },
-//            dismissButton = {
-//                TextButton(
-//                    onClick = { viewModel.clearDetectedTag() }
-//                ) {
-//                    Text("Ignore")
-//                }
-//            }
-//        )
-//    }
+    assignTagDialogState?.let { (itemId, itemName) ->
+        AlertDialog(
+            onDismissRequest = { assignTagDialogState = null },
+            title = { Text("Item Added Successfully") },
+            text = { Text("Do you want to assign an NFC tag to '$itemName' now?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        assignTagDialogState = null
+                        navController.navigate("scanner/$itemId")
+                    }
+                ) {
+                    Text("Assign Now")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { assignTagDialogState = null }
+                ) {
+                    Text("Later")
+                }
+            }
+        )
+    }
 }
